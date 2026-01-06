@@ -12,6 +12,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 #pragma once
 
 #include <atomic>
@@ -21,6 +22,8 @@
 #include <mutex>
 #include <queue>
 #include <vector>
+#include <future>
+#include <thread>
 
 #include "thread_pool.h"
 
@@ -29,7 +32,7 @@ template <typename Predictor, typename PredictorParams, typename PredictorInput,
 class AutoParallelSimpleInferencePredictor {
 private:
   struct InferenceInstance {
-    std::shared_ptr<Predictor> Predictor;
+    std::shared_ptr<Predictor> Predictor_;
     std::queue<PredictorInput> task_queue;
     std::queue<std::promise<PredictorResult>> promise_queue;
     std::mutex queue_mutex;
@@ -38,13 +41,17 @@ private:
   };
 
 public:
-  AutoParallelSimpleInferencePredictor(const PredictorParams &params);
-  absl::Status Init();
+  AutoParallelSimpleInferencePredictor(const PredictorParams &params, int thread_num);
+  
+  bool Init();
 
   std::future<PredictorResult> PredictAsync(const PredictorInput &input);
 
-  absl::Status PredictThread(const PredictorInput &input);
-  absl::StatusOr<PredictorResult> GetResult();
+
+  bool PredictThread(const PredictorInput &input);
+  
+
+  bool GetResult(PredictorResult& result_out);
 
   virtual ~AutoParallelSimpleInferencePredictor();
 
@@ -61,16 +68,16 @@ private:
   std::mutex legacy_results_mutex_;
 };
 
+
 template <typename Predictor, typename PredictorParams, typename PredictorInput,
           typename PredictorResult>
 AutoParallelSimpleInferencePredictor<Predictor, PredictorParams, PredictorInput,
                                     PredictorResult>::
-    AutoParallelSimpleInferencePredictor(const PredictorParams &params,int thread_num)
+    AutoParallelSimpleInferencePredictor(const PredictorParams &params, int thread_num)
     : params_(params), thread_num_(thread_num) {
   if (thread_num_ > 1) {
-    auto status = Init();
-    if (!status.ok()) {
-      INFOE("Predictor pool init error : %s", status.ToString().c_str());
+    if (!Init()) {
+      std::cerr << "Predictor pool init error." << std::endl;
       exit(-1);
     }
   }
@@ -78,8 +85,7 @@ AutoParallelSimpleInferencePredictor<Predictor, PredictorParams, PredictorInput,
 
 template <typename Predictor, typename PredictorParams, typename PredictorInput,
           typename PredictorResult>
-absl::Status
-AutoParallelSimpleInferencePredictor<Predictor, PredictorParams, PredictorInput,
+bool AutoParallelSimpleInferencePredictor<Predictor, PredictorParams, PredictorInput,
                                     PredictorResult>::Init() {
   try {
     pool_ = std::unique_ptr<PaddlePool::ThreadPool>(
@@ -90,17 +96,15 @@ AutoParallelSimpleInferencePredictor<Predictor, PredictorParams, PredictorInput,
           std::unique_ptr<InferenceInstance>(new InferenceInstance());
       instance->instance_id = i;
 
-      instance->Predictor = std::shared_ptr<Predictor>(new Predictor(params_));
+      instance->Predictor_ = std::shared_ptr<Predictor>(new Predictor(params_));
 
       instances_.push_back(std::move(instance));
     }
-  } catch (const std::bad_alloc &e) {
-    return absl::ResourceExhaustedError(std::string("Out of memory: ") +
-                                        e.what());
   } catch (const std::exception &e) {
-    return absl::InternalError(std::string("Init failed: ") + e.what());
+    std::cerr << "Init failed: " << e.what() << std::endl;
+    return false;
   }
-  return absl::OkStatus();
+  return true;
 }
 
 template <typename Predictor, typename PredictorParams, typename PredictorInput,
@@ -121,8 +125,7 @@ std::future<PredictorResult> AutoParallelSimpleInferencePredictor<
   }
 
   bool expected = false;
-  if (instance->is_busy.compare_exchange_strong(
-          expected, true)) { // one instance just process one input
+  if (instance->is_busy.compare_exchange_strong(expected, true)) {
     pool_->submit([this, instance_id]() { ProcessInstanceTasks(instance_id); });
   }
 
@@ -138,6 +141,9 @@ void AutoParallelSimpleInferencePredictor<
 
   while (true) {
     std::promise<PredictorResult> promise;
+    
+    std::unique_ptr<PredictorInput> input_ptr;
+
     {
       std::lock_guard<std::mutex> lock(instance->queue_mutex);
       if (instance->task_queue.empty()) {
@@ -151,13 +157,18 @@ void AutoParallelSimpleInferencePredictor<
         }
         return;
       }
-      PredictorInput input = std::move(instance->task_queue.front());
+      
+      
+      input_ptr.reset(new PredictorInput(std::move(instance->task_queue.front())));
       instance->task_queue.pop();
+      
       promise = std::move(instance->promise_queue.front());
       instance->promise_queue.pop();
-    }
+    } 
+
     try {
-      PredictorResult result = instance->Predictor->Predict(input);
+    
+      PredictorResult result = instance->Predictor_->Predict(*input_ptr);
       promise.set_value(std::move(result));
     } catch (const std::exception &e) {
       promise.set_exception(std::current_exception());
@@ -167,7 +178,7 @@ void AutoParallelSimpleInferencePredictor<
 
 template <typename Predictor, typename PredictorParams, typename PredictorInput,
           typename PredictorResult>
-absl::Status AutoParallelSimpleInferencePredictor<
+bool AutoParallelSimpleInferencePredictor<
     Predictor, PredictorParams, PredictorInput,
     PredictorResult>::PredictThread(const PredictorInput &input) {
   try {
@@ -176,32 +187,32 @@ absl::Status AutoParallelSimpleInferencePredictor<
     std::lock_guard<std::mutex> lock(legacy_results_mutex_);
     legacy_results_.push(std::move(future));
 
-    return absl::OkStatus();
+    return true;
   } catch (const std::exception &e) {
-    return absl::InternalError(std::string("Failed to submit inference: ") +
-                               e.what());
+    std::cerr << "Failed to submit inference: " << e.what() << std::endl;
+    return false;
   }
 }
 
 template <typename Predictor, typename PredictorParams, typename PredictorInput,
           typename PredictorResult>
-absl::StatusOr<PredictorResult>
-AutoParallelSimpleInferencePredictor<Predictor, PredictorParams, PredictorInput,
-                                    PredictorResult>::GetResult() {
+bool AutoParallelSimpleInferencePredictor<Predictor, PredictorParams, PredictorInput,
+                                    PredictorResult>::GetResult(PredictorResult& result_out) {
   std::lock_guard<std::mutex> lock(legacy_results_mutex_);
 
-  if (legacy_results_.empty())
-    return absl::NotFoundError("No inference result available");
+  if (legacy_results_.empty()) {
+    return false; 
+  }
 
   try {
     auto future = std::move(legacy_results_.front());
     legacy_results_.pop();
 
-    PredictorResult result = future.get();
-    return result;
+    result_out = future.get(); 
+    return true;
   } catch (const std::exception &e) {
-    return absl::InternalError(std::string("Failed to get inference result: ") +
-                               e.what());
+    std::cerr << "Failed to get inference result: " << e.what() << std::endl;
+    return false;
   }
 }
 
@@ -210,6 +221,7 @@ template <typename Predictor, typename PredictorParams, typename PredictorInput,
 AutoParallelSimpleInferencePredictor<
     Predictor, PredictorParams, PredictorInput,
     PredictorResult>::~AutoParallelSimpleInferencePredictor() {
+  
   while (!legacy_results_.empty()) {
     try {
       legacy_results_.front().get();

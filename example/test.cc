@@ -1,80 +1,75 @@
-#include "src/parallel.h"
-#include "src/safe_stl.h"
-#include <string>
+#include <iostream>
+#include <chrono>
+#include <thread>
+#include <iomanip>
+#include "parallel.h"
 
-// 模拟推理接口
-class Infer {
+// --- 模拟耗时 100ms 的推理 ---
+const int DELAY_MS = 100;
+
+struct MockParams {};
+using MockInput = int;
+using MockResult = int;
+
+class MockPredictor {
 public:
-    Infer(std::string& model_path): model_path_(model_path){};
-    std::string Predict(int input){
-        std::this_thread::sleep_for(std::chrono::milliseconds(100)); // 模拟耗时
-        return "infer" + std::to_string(input);
+    MockPredictor(const MockParams&) {}
+    MockResult Predict(const MockInput& in) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(DELAY_MS));
+        return in * 2;
     }
-private:
-    std::string model_path_;
+};
+
+// --- 串行基准测试 ---
+void RunSerial(int tasks) {
+    MockParams params;
+    MockPredictor predictor(params);
+
+    auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < tasks; ++i) {
+        predictor.Predict(i);
+    }
+    auto end = std::chrono::steady_clock::now();
+    
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    std::cout << "[Serial  ] Tasks: " << tasks << " | Time: " << ms << " ms | QPS: " 
+              << (tasks * 1000.0 / ms) << std::endl;
 }
 
 
-class MutiInfer : public AutoParallelSimpleInferencePredictor<Infer,std::string,int,std::string>{
+void RunParallel(int tasks, int threads) {
+    MockParams params;
+    using AutoPredictor = AutoParallelSimpleInferencePredictor<MockPredictor, MockParams, MockInput, MockResult>;
+    AutoPredictor parallel_predictor(params, threads);
 
-public:
-    MutiInfer(std::string model_path,int thread_num): AutoParallelSimpleInferencePredictor(model_path,thread_num){};
+    auto start = std::chrono::steady_clock::now();
+    
 
-    std::vector<std::string> Predict(std::vector<int> input){
-        std::vector<int> res;
-        for(auto& item: input){
-            AutoParallelSimpleInferencePredictor::PredictThread(item); // 异步操作
-        }
-        for(int i = 0; i < input.size(); i++){
-            auto result = AutoParallelSimpleInferencePredictor::GetResult();
-            res.push_back(result);
-        }
+    for (int i = 0; i < tasks; ++i) {
+        parallel_predictor.PredictThread(i);
     }
-
-private:
-    int thread_num_;
-}
-
-
-void Producer(ThreadSafeDeque<int>& dq) {
-    int val =0;
-    while(true){
-        dq.push_back(val);
-        std::cout << "[生产者 " << id << "] 推入: " << val << std::endl;
-        std::this_thread::sleep_for(std::chrono::milliseconds(100)); // 模拟耗时
-        val++;
+    
+    MockResult res;
+    for (int i = 0; i < tasks; ++i) {
+        parallel_predictor.GetResult(res);
     }
-}
+    
+    auto end = std::chrono::steady_clock::now();
 
-void Consumer(ThreadSafeDeque<int>& dq, MutiInfer& mutiinfer ){
-    std::vector<int> inputs;
-    std::vector<int> res;
-    while(true){
-        int input;
-        dq.wait_and_pop_front(input);
-        inputs.push_back(inputs);
-        if(inputs.size() > 10){
-           auto result =  mutiinfer.Predict(inputs);
-           res.insert(res.end(),
-                   std::make_move_iterator(result.begin()),
-                   std::make_move_iterator(result.end()));
-           inputs.clear();
-        }
-    }
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    std::cout << "[Parallel] Tasks: " << tasks << " | Time: " << ms << " ms | QPS: " 
+              << (tasks * 1000.0 / ms) << " (Threads: " << threads << ")" << std::endl;
 }
-
 
 int main() {
-    ThreadSafeDeque<int> dq;
+    int tasks = 200;
+    int threads = 8;
 
-    MutiInfer multi_infer_engine("model_path",10); //开启10个实例同时推理
-
-
-    std::thread producer_thread(Producer, std::ref(dq));
-
-    std::thread consumer_thread(Consumer, std::ref(dq), std::ref(multi_infer_engine));
-
-    producer_thread.join();
-    consumer_thread.join();
+    std::cout << "=== Performance Comparison (Task Cost: " << DELAY_MS << "ms) ===" << std::endl;
+    
+    RunSerial(tasks);
+    RunParallel(tasks, threads);
+    
+    std::cout << "==========================================================" << std::endl;
     return 0;
 }
