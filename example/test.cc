@@ -62,8 +62,8 @@ void RunParallel(int tasks, int threads) {
 }
 
 int main() {
-    int tasks = 200;
-    int threads = 8;
+    int tasks = 20;
+    int threads = 4;
 
     std::cout << "=== Performance Comparison (Task Cost: " << DELAY_MS << "ms) ===" << std::endl;
     
