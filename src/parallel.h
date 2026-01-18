@@ -211,7 +211,7 @@ bool AutoParallelSimpleInferencePredictor<Predictor, PredictorParams, PredictorI
     result_out = future.get(); 
     return true;
   } catch (const std::exception &e) {
-    std::cerr << "Failed to get inference result: " << e.what() << std::endl;
+    // std::cerr << "Failed to get inference result: " << e.what() << std::endl;
     return false;
   }
 }
