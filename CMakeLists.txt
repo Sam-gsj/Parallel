@@ -6,7 +6,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 开启所有警告并优化
 # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -O2")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -g -O0")
+# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -g -O0")
+    add_compile_options(-g)
+    # 关闭编译器优化（避免调试时代码逻辑混乱）
+    add_compile_options(-O0)
 
 # 设置架构 (根据你的板子，RK3588 通常是 aarch64)
 set(LIB_ARCH aarch64)
